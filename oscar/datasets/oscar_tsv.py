@@ -862,6 +862,7 @@ class FakeOscarTSVDataset(Dataset):
         
         # device=torch.cuda.current_device()
         print(f"current device : {torch.cuda.current_device()}")
+        # device=f"cuda:{torch.cuda.current_device()}"
         device="cpu"
 
         img_feat = create_img_feat(self, device)

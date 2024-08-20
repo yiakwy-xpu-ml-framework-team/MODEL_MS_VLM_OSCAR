@@ -42,6 +42,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     ## Required parameters
+    parser.add_argument("--not_use_data_parallel", action='store_true', help="use to determin data parallel env")
     parser.add_argument("--use_fakedata", action='store_true', help="use faked data")
     parser.add_argument("--data_dir", default=None, type=str, required=False,
                         help="The input data dir. "
@@ -121,7 +122,7 @@ def main():
                         help="Whether to load train samples into memory or use disk")
     parser.add_argument("--do_lower_case", action='store_true',
                         help="Whether to lower case the input text. True for uncased models, False for cased models.")
-    parser.add_argument("--local_rank", type=int, default=-1,
+    parser.add_argument("--local-rank", type=int, default=-1,
                         help="local_rank for distributed training on gpus")
     parser.add_argument('--seed', type=int, default=42,
                         help="random seed for initialization")
@@ -158,7 +159,8 @@ def main():
     args.num_gpus = int(
         os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     # TODO (yiakwy) :
-    print(f"WORLD_SIZE : {args.num_gpus}")
+    if get_rank() == 0:
+        print(f"WORLD_SIZE : {args.num_gpus}")
     args.distributed = args.num_gpus > 1
 
     if args.gpu_ids != '-1':
@@ -172,8 +174,11 @@ def main():
         device = torch.device(
             "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
         # TODO (yiakwy)
-        # args.n_gpu = torch.cuda.device_count()
-        args.n_gpu = 1
+        if args.not_use_data_parallel:
+            # not launched with torch.distributed
+            args.n_gpu = 1
+        else:
+            args.n_gpu = torch.cuda.device_count()
     else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
@@ -256,7 +261,8 @@ def main():
     # Prepare model
     # model = BertForPreTraining.from_pretrained(args.bert_model)
 
-    print("Pareparing model ...")
+    if get_rank() == 0:
+        print("Pareparing model ...")
 
     load_num = 0
     while load_num < 10:
@@ -269,7 +275,8 @@ def main():
         except:
             load_num += 1
 
-    print("BertImgForPreTraining loaded.")
+    if get_rank() == 0:
+        print("BertImgForPreTraining loaded.")
 
     # train from scratch
     if args.from_scratch:
@@ -289,8 +296,9 @@ def main():
     model.to(args.device)
 
     # TODO (yiakwy)
-    print("model architecture :")
-    print(model)
+    if get_rank() == 0 or args.local_rank == -1:
+        print("model architecture :")
+        print(model)
 
     logger.info("Training/evaluation parameters %s", args)
 
@@ -396,6 +404,12 @@ def main():
 
         images1, input_ids1, input_mask1, segment_ids1, lm_label_ids1, is_next1 \
             = data_process(batch)
+
+        # if get_rank() == 0:
+        #     print("*************************************")
+        #     print(f"data batches : {input_ids1.shape[0]}")
+        #     print("*************************************")
+            
         if batch_extra is not None:
             images2, input_ids2, input_mask2, segment_ids2, lm_label_ids2, is_next2 \
                 = data_process(batch_extra)
@@ -448,6 +462,7 @@ def main():
         arguments["iteration"] = step + 1
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
+            start3 = time.time()
             # do gradient clipping
             if args.max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
@@ -457,12 +472,14 @@ def main():
             optimizer.zero_grad()
 
             # measure elapsed time
+            wu_time = time.time() - start3
             batch_time = time.time() - end
             end = time.time()
             metrics_to_log = {
                 'time_info': {'compute': batch_time, 'data': data_time,
                               'compute1': compute_time1,
-                              'compute2': compute_time2},
+                              'compute2': compute_time2,
+                              'wu_time' : wu_time},
                 'batch_metrics': {'loss': loss1+loss2}
             }
             params_to_log = {'params': {'bert_lr': optimizer.param_groups[0]["lr"]}}
