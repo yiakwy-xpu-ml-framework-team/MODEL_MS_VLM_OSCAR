@@ -20,7 +20,7 @@ from oscar.modeling.modeling_bert import BertImgForPreTraining
 from transformers.pytorch_transformers import (WEIGHTS_NAME, BertConfig,
                                   BertTokenizer)
 
-from oscar.datasets.build import make_data_loader
+from oscar.datasets.build import make_data_loader, make_fake_dataset_dataload
 
 from transformers.pytorch_transformers import AdamW, WarmupLinearSchedule
 from oscar.utils.misc import mkdir, get_rank
@@ -42,10 +42,11 @@ def main():
     parser = argparse.ArgumentParser()
 
     ## Required parameters
+    parser.add_argument("--use_fakedata", action='store_true', help="use faked data")
     parser.add_argument("--data_dir", default=None, type=str, required=False,
                         help="The input data dir. "
                              "Should contain the .yaml files for the task.")
-    parser.add_argument("--dataset_file", default=None, type=str, required=True,
+    parser.add_argument("--dataset_file", default=None, type=str, required=False, # TODO (yiakwy) : changed to optional
                         help="The training dataset yaml file.")
     parser.add_argument("--extra_dataset_file", default=None, type=str, required=False,
                         help="The extra training dataset yaml file.")
@@ -156,6 +157,8 @@ def main():
 
     args.num_gpus = int(
         os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
+    # TODO (yiakwy) :
+    print(f"WORLD_SIZE : {args.num_gpus}")
     args.distributed = args.num_gpus > 1
 
     if args.gpu_ids != '-1':
@@ -168,7 +171,9 @@ def main():
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device(
             "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-        args.n_gpu = torch.cuda.device_count()
+        # TODO (yiakwy)
+        # args.n_gpu = torch.cuda.device_count()
+        args.n_gpu = 1
     else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
@@ -250,6 +255,9 @@ def main():
 
     # Prepare model
     # model = BertForPreTraining.from_pretrained(args.bert_model)
+
+    print("Pareparing model ...")
+
     load_num = 0
     while load_num < 10:
         try:
@@ -260,6 +268,8 @@ def main():
             break
         except:
             load_num += 1
+
+    print("BertImgForPreTraining loaded.")
 
     # train from scratch
     if args.from_scratch:
@@ -277,6 +287,10 @@ def main():
         torch.distributed.barrier()
 
     model.to(args.device)
+
+    # TODO (yiakwy)
+    print("model architecture :")
+    print(model)
 
     logger.info("Training/evaluation parameters %s", args)
 
@@ -319,8 +333,10 @@ def main():
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
-    # train_examples = None
-    train_dataloaders = make_data_loader(
+    # TODO (yiakwy) : use faked data input
+    data_loader_factory = make_fake_dataset_dataload if args.use_fakedata else make_data_loader
+    
+    train_dataloaders = data_loader_factory(
         args, is_distributed=args.distributed, arguments=arguments
     )
 

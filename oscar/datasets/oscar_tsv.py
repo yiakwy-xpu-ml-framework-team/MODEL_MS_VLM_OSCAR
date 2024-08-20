@@ -800,3 +800,104 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
             tokens_a.pop()
         else:
             tokens_b.pop()
+
+
+# Return an instance of faked data
+
+# input_ids, input_mask, segment_ids, lm_label_ids, is_next, loss_weight=1.0
+def create_input_ids(self, device="cuda", dtype=torch.long):
+    micro_batch_size = 1
+    max_length = self.seq_len
+    vocab_size = len(self.vocab)
+
+    input_ids_shape = (max_length,)            
+    input_ids = torch.randint(
+        0, vocab_size, 
+        input_ids_shape,
+        dtype=dtype, 
+        device=device 
+    )
+
+    return input_ids
+
+def create_input_mask(self, img_feat_len, device="cuda", dtype=torch.long):
+    input_mask_shape = (self.seq_len + img_feat_len,)
+    input_mask = torch.ones(input_mask_shape, dtype=dtype, device=device)
+    return input_mask
+
+# segment_ids.append(0)
+# lm_label_ids.append(-1)
+def create_segement_ids(self, device="cuda", dtype=torch.long):
+    max_length = self.seq_len
+    segment_ids = torch.ones(max_length, dtype=dtype, device=device)
+    return segment_ids
+
+# numpy image
+def create_img_feat(self, device="cuda", dtype=torch.float32):
+    # feat = np.frombuffer(base64.b64decode(arr[-1]),
+    #                      dtype=np.float32).reshape(
+    #     (num_boxes, self.args.img_feature_dim))
+    # feat = torch.from_numpy(feat)
+    img_feat_shape = (self.args.max_img_seq_length, self.args.img_feature_dim)
+    img_feat = torch.empty(img_feat_shape, dtype=dtype, device=device).normal_(mean=0.1, std=0.2)
+    return img_feat
+
+class FakeOscarTSVDataset(Dataset):
+
+    def __init__(self, args=None, tokenizer=None, seq_len=35,
+                 encoding="utf-8", on_memory=True,
+                 **kwargs):
+        self.args = args
+        self.vocab = tokenizer.vocab
+        self.tokenizer = tokenizer
+        self.seq_len = seq_len
+        self.encoding = encoding
+        self.on_memory = on_memory
+
+        self.prepared_data = self.__prepare_data()
+
+
+    def __prepare_data(self):
+        # torch device
+        
+        # device=torch.cuda.current_device()
+        print(f"current device : {torch.cuda.current_device()}")
+        device="cpu"
+
+        img_feat = create_img_feat(self, device)
+        img_feat_len = img_feat.shape[0]
+
+        input_ids = create_input_ids(self, device)
+
+        # if args.max_img_seq_length > 0:
+        #     if img_feat_len > args.max_img_seq_length:
+        #         input_mask = input_mask + [1] * img_feat_len
+        #     else:
+        #         input_mask = input_mask + [1] * img_feat_len
+        #         pad_img_feat_len = args.max_img_seq_length - img_feat_len
+        #         input_mask = input_mask + ([0] * pad_img_feat_len)
+
+        # lm_label_ids = lm_label_ids + [-1] * args.max_img_seq_length
+
+        input_mask = create_input_mask(self, img_feat_len, device)
+        segment_ids = create_segement_ids(self, device)
+
+        lm_label_ids = [-1] * (self.seq_len + img_feat_len)
+        lm_label_ids = torch.tensor(lm_label_ids, dtype=torch.long, device=device)
+
+        return img_feat, (
+            input_ids,
+            input_mask,
+            segment_ids,
+            lm_label_ids,
+            torch.tensor(0),
+            torch.tensor(0),
+        )
+
+    def __len__(self):
+        return 64
+
+    def __getitem__(self, item):
+        img_feat, bert_inputs = self.prepared_data
+        return img_feat, bert_inputs, item
+    
