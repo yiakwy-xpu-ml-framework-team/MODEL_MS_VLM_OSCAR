@@ -26,6 +26,8 @@ from transformers.pytorch_transformers import AdamW, WarmupLinearSchedule
 from oscar.utils.misc import mkdir, get_rank
 from oscar.utils.metric_logger import TensorboardLogger
 
+from oscar.modeling.modeling_utils import get_flops
+
 logger = logging.getLogger(__name__)
 
 ALL_MODELS = sum((tuple(conf.pretrained_config_archive_map.keys()) for conf in (BertConfig,)), ())
@@ -34,6 +36,7 @@ MODEL_CLASSES = {
     'bert': (BertConfig, BertImgForPreTraining, BertTokenizer),
 }
 
+DEBUG = False
 
 """ ****** Pretraining ****** """
 
@@ -278,6 +281,10 @@ def main():
     if get_rank() == 0:
         print("BertImgForPreTraining loaded.")
 
+    # TODO (yiakwy) : to remove
+    # print("model : ", model)
+    # exit(0)
+
     # train from scratch
     if args.from_scratch:
         if last_checkpoint_dir is None:
@@ -301,6 +308,12 @@ def main():
         print(model)
 
     logger.info("Training/evaluation parameters %s", args)
+    batch_size = args.train_batch_size / args.gradient_accumulation_steps / args.n_gpu
+    flops_per_gpu = get_flops(args, config, batch_size)
+
+    flops_per_gpu = flops_per_gpu / 1024 / 1024 / 1024
+    if get_rank() == 0 or args.local_rank == -1:
+        print(f"flops_per_gpu : {flops_per_gpu} GFLOPS")
 
     tb_log_dir = os.path.join(args.output_dir, 'train_logs')
     meters = TensorboardLogger(
@@ -337,7 +350,7 @@ def main():
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], output_device=args.local_rank,
-            find_unused_parameters=True)
+            find_unused_parameters=False)
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
@@ -386,6 +399,7 @@ def main():
     for step, (batch, batch_extra) in enumerate(zip(train_dataloader, train_dataloader_extra), start_iter):
         if not clock_started:
             start_training_time = time.time()
+            # iteration start
             end = time.time()
             clock_started = True
 
@@ -402,19 +416,20 @@ def main():
 
             return images, input_ids, input_mask, segment_ids, lm_label_ids, is_next
 
+        start0 = time.time()
         images1, input_ids1, input_mask1, segment_ids1, lm_label_ids1, is_next1 \
             = data_process(batch)
 
-        # if get_rank() == 0:
-        #     print("*************************************")
-        #     print(f"data batches : {input_ids1.shape[0]}")
-        #     print("*************************************")
-            
+        if get_rank() == 0 and DEBUG:
+            print("*************************************")
+            print(f"data batches : {input_ids1.shape[0]}")
+            print("*************************************")
+
         if batch_extra is not None:
             images2, input_ids2, input_mask2, segment_ids2, lm_label_ids2, is_next2 \
                 = data_process(batch_extra)
 
-        data_time = time.time() - end
+        data_time = time.time() - start0
 
         def forward_backward(images, input_ids, input_mask, segment_ids,
                              lm_label_ids, is_next, loss_weight=1.0):
@@ -423,6 +438,10 @@ def main():
 
             outputs = model(input_ids, segment_ids, input_mask,
                             lm_label_ids, is_next, img_feats=image_features)
+
+            # TODO (yiakwy) : remove the codes
+            # print("execute onece fwd")
+            # exit(0)
 
             loss = loss_weight * outputs[0]
 
@@ -472,21 +491,35 @@ def main():
             optimizer.zero_grad()
 
             # measure elapsed time
-            wu_time = time.time() - start3
+            wu_time = time.time() - start3 
             batch_time = time.time() - end
-            end = time.time()
+            
+            # TODO (yiakwy) : should not update here
+            # end = time.time()
+
+            tflops_per_gpu_per_sec = flops_per_gpu / (compute_time1 + compute_time2 + wu_time) / 1024
+
             metrics_to_log = {
                 'time_info': {'compute': batch_time, 'data': data_time,
                               'compute1': compute_time1,
                               'compute2': compute_time2,
-                              'wu_time' : wu_time},
+                              'wu_time' : wu_time,
+                              'tflops/GPU/sec' : tflops_per_gpu_per_sec},
                 'batch_metrics': {'loss': loss1+loss2}
             }
             params_to_log = {'params': {'bert_lr': optimizer.param_groups[0]["lr"]}}
+
+            start4 = time.time()
             meters.update_metrics(metrics_to_log)
             meters.update_params(params_to_log)
+            log_time = time.time() - start4
+            # TODO (yiakwy) : remove
+            # if get_rank() == 0 or local_rank == -1:
+            #     print(f"step {step} : log time {log_time}")
 
             if args.log_period > 0 and (step + 1) % args.log_period == 0:
+                # if get_rank() == 0 or local_rank == -1:
+                #     print(f"step {step} : save checkpoint")
                 avg_time = meters.meters['time_info']['compute'].global_avg
                 eta_seconds = avg_time * (max_iter - step - 1)
                 eta_string = str(
@@ -504,8 +537,12 @@ def main():
                         memory=torch.cuda.max_memory_allocated() / 1024.0 / 1024.0,
                     ) + "\n    " + meters.get_logs(step + 1)
                 )
+        
+            end = time.time()
 
         if (step + 1) == max_iter or (step + 1) % args.ckpt_period == 0:  # Save a trained model
+            # if get_rank() == 0 or local_rank == -1:
+            #     print(f"step {step} : save checkpoint")
             log_json[step+1] = tr_loss
             train_metrics_total = torch.Tensor([tr_loss, nb_tr_examples, nb_tr_steps]).to(args.device)
             torch.distributed.all_reduce(train_metrics_total)

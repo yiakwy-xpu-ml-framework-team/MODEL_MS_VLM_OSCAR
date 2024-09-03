@@ -896,7 +896,7 @@ class FakeOscarTSVDataset(Dataset):
         )
 
     def __len__(self):
-        return 64
+        return 8096
 
     def __getitem__(self, item):
         img_feat, bert_inputs = self.prepared_data
