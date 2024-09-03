@@ -2,7 +2,7 @@ import os
 import logging
 import torch
 from oscar.utils.misc import get_world_size
-from .oscar_tsv import OscarTSVDataset
+from .oscar_tsv import OscarTSVDataset, FakeOscarTSVDataset
 from transformers.pytorch_transformers import BertTokenizer
 
 
@@ -13,7 +13,6 @@ class BatchCollator(object):
     """
     def __call__(self, batch):
         return list(zip(*batch))
-
 
 def build_dataset(args):
     """
@@ -45,6 +44,26 @@ def build_dataset(args):
 
     return datasets
 
+def build_fake_dataset(args):
+    """
+    Arguments:
+        args: configuration.
+    """
+    tokenizer = BertTokenizer.from_pretrained(
+        args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
+        do_lower_case=args.do_lower_case)
+
+    cfg = dict(
+        args=args,
+        seq_len=args.max_seq_length,
+        on_memory=args.on_memory,
+        tokenizer=tokenizer,
+    )
+
+    # make dataset from factory
+    datasets = [FakeOscarTSVDataset(**cfg)]
+
+    return datasets
 
 def make_data_sampler(dataset, shuffle, distributed):
     if distributed:
@@ -130,6 +149,54 @@ def make_data_loader(args, is_distributed=False, arguments=None):
 
     # build dataset
     datasets = build_dataset(args)
+
+    data_loaders = []
+    for i, dataset in enumerate(datasets):
+        sampler = make_data_sampler(dataset, shuffle, is_distributed)
+
+        batch_sampler = make_batch_data_sampler(
+           sampler, images_per_gpu, num_iters, start_iter
+        )
+        num_workers = args.num_workers
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            num_workers=num_workers,
+            batch_sampler=batch_sampler,
+            collate_fn=BatchCollator(),
+            pin_memory=True,
+        )
+        data_loaders.append(data_loader)
+    return data_loaders
+
+def make_fake_dataset_dataload(args, is_distributed=False, arguments=None):
+    num_gpus = get_world_size()
+    # figure out start iteration
+    if arguments is None:
+        start_iter = 0
+    else:
+        start_iter = arguments['iteration']
+    # figure out the batchsize
+    grad_accumulate_steps = 1
+    if hasattr(args, 'gradient_accumulation_steps'):
+        grad_accumulate_steps = args.gradient_accumulation_steps
+    assert (
+            args.train_batch_size % grad_accumulate_steps == 0
+    ), "train_batch_size ({}) must be divisible by the number "
+    "of Gradient accumulation ({}) used."\
+        .format(args.train_batch_size, grad_accumulate_steps)
+    images_per_batch = args.train_batch_size//grad_accumulate_steps
+    assert (
+        images_per_batch % num_gpus == 0
+    ), "SOLVER.IMS_PER_BATCH ({}) must be divisible by the number "
+    "of GPUs ({}) used.".format(images_per_batch, num_gpus)
+    images_per_gpu = images_per_batch // num_gpus
+    logger = logging.getLogger(__name__)
+    logger.info("Train with {} images per GPU".format(images_per_gpu))
+    shuffle = True
+    num_iters = args.max_iters * grad_accumulate_steps
+
+    # build dataset
+    datasets = build_fake_dataset(args)
 
     data_loaders = []
     for i, dataset in enumerate(datasets):

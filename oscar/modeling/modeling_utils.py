@@ -873,3 +873,32 @@ class ImgPreTrainedModel(PreTrainedModel):
             return model, loading_info
 
         return model
+
+# bert-base-uncased config
+def get_flops(args, configs, batch_size, text_feat=35, img_feat=50):
+    b = batch_size # suppose to be 64 for example
+    layers = configs.num_hidden_layers # defaults to 12
+    s = img_feat + text_feat
+    d = configs.hidden_size # defaults to 768
+
+    # qk score + softmax(sv/scaler) , e.g. 10336174080 for 2 * 355123200 (b*s*s*d) + 3 * 3208642560 (b*s*d*d)
+    self_attn_macs = (       
+        2 * b*s*s*d
+        + 3 * b*s*d*d
+    )
+
+    # we ignore layernor, since it is too small b*s*d and no bias
+    dense_macs = b * s *d * d
+    # self_dense_macs = b * s *d * (d+1)
+
+    dense_1_macs = 4 * dense_macs
+    dense_2_macs = 4 * dense_macs
+
+    bert_flops = 2 * layers * (
+        self_attn_macs
+        + dense_macs
+        + dense_1_macs 
+        + dense_2_macs
+    )
+    
+    return bert_flops
